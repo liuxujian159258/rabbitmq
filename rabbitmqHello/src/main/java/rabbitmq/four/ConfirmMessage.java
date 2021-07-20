@@ -6,6 +6,7 @@ import util.RabbitMqUtils;
 
 import java.io.IOException;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.TimeoutException;
 
 public class ConfirmMessage {
@@ -32,7 +33,7 @@ public class ConfirmMessage {
             channel.basicPublish("", queueName,null,message.getBytes());
             // 单个消息马上进行发布确认
             boolean b = channel.waitForConfirms();
-            if (false) {
+            if (b) {
                 System.out.println("消息发送成功");
             }
         }
@@ -77,15 +78,27 @@ public class ConfirmMessage {
         channel.confirmSelect();
         // 开始时间
         long begin = System.currentTimeMillis();
-        // 批量确认消息大小
-        int batchSize = 100;
+        // 线程安全有序的一个hash表，适用于高并发的情况下
+        // 1.将序号与消息进行关联
+        // 2.轻松根据序号批量删除条目
+        // 3.支持高并发
+        ConcurrentSkipListMap<Long, String> concurrentSkipListMap = new ConcurrentSkipListMap<>();
         // 消息确认成功，回调函数
         // deliveryTag,消息标识，multiple是否为批量确认
         ConfirmCallback ackCallback = (deliveryTag,multiple) -> {
+            // 删除已经确认的消息，剩下的就是为确认的消息
+            if (multiple) {
+                ConcurrentSkipListMap<Long, String> confirm = (ConcurrentSkipListMap<Long, String>) concurrentSkipListMap.headMap(deliveryTag);
+                confirm.clear();
+            }else {
+                concurrentSkipListMap.remove(deliveryTag);
+            }
+            System.out.println("确认的消息：" + deliveryTag);
 
         };
         ConfirmCallback nackCallback = (deliveryTag,multiple) -> {
-            System.out.println("未确认的消息：" + deliveryTag);
+            String s = concurrentSkipListMap.get(deliveryTag);
+            System.out.println("未确认的消息：" + deliveryTag + "内容:" +s);
         };
         // 消息监听器
         channel.addConfirmListener(ackCallback, nackCallback);
@@ -93,6 +106,7 @@ public class ConfirmMessage {
         for (int i = 0; i < MESSAGE_COUNT; i++) {
             String message = i + "";
             channel.basicPublish("", queueName,null,message.getBytes());
+            concurrentSkipListMap.put(channel.getNextPublishSeqNo(), message);
         }
         // 结束时间
         long end = System.currentTimeMillis();
